@@ -73,8 +73,17 @@ def make_handler(service: Any, static_dir: Path):
                     return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
-                    records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
+                    records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]), kind="voyage")
                     self._send(200, {"items": records})
+                    return
+                if parsed.path == "/api/maintenances":
+                    query = parse_qs(parsed.query)
+                    records = service.list_maintenances(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
+                    self._send(200, {"items": records})
+                    return
+                if parsed.path == "/api/board":
+                    query = parse_qs(parsed.query)
+                    self._send(200, service.board(self._actor(), berth=query.get("berth", [None])[0]))
                     return
                 match = RECORD_RE.match(parsed.path)
                 if match:
@@ -97,6 +106,10 @@ def make_handler(service: Any, static_dir: Path):
                 body = self._body()
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
+                    self._send(201, record)
+                    return
+                if parsed.path == "/api/maintenances":
+                    record = service.create_maintenance(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
                     return
                 match = ACTION_RE.match(parsed.path)

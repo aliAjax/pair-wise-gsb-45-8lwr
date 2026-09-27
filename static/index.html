@@ -5,29 +5,228 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>港口泊位与航道调度</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
-    button { padding: .55rem .9rem; cursor: pointer; }
-    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; background: #f7f9fb; }
+    main { max-width: 1100px; margin: auto; }
+    h1 { margin-bottom: .25rem; }
+    h2 { margin-top: 2rem; border-bottom: 2px solid #d8e0e8; padding-bottom: .3rem; }
+    .muted { color: #5b6b7b; font-size: .92rem; }
+    .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .5rem 0; }
+    button { padding: .45rem .8rem; cursor: pointer; border: 1px solid #2b6cb0; background: #2b6cb0; color: #fff; border-radius: 6px; font-size: .9rem; }
+    button.secondary { background: #4a5568; border-color: #4a5568; }
+    button.warn { background: #b7791f; border-color: #b7791f; }
+    button.ok { background: #2f855a; border-color: #2f855a; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    input, select { padding: .4rem .5rem; border: 1px solid #b9c4cf; border-radius: 6px; font-size: .9rem; }
+    table { border-collapse: collapse; width: 100%; background: #fff; font-size: .88rem; margin-top: .6rem; }
+    th, td { border: 1px solid #dde3e9; padding: .45rem .55rem; text-align: left; vertical-align: top; }
+    th { background: #edf2f7; }
+    .tag { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .76rem; color: #fff; }
+    .tag-draft { background: #718096; }
+    .tag-confirmed { background: #2b6cb0; }
+    .tag-extended { background: #b7791f; }
+    .tag-completed { background: #2f855a; }
+    .tag-cancelled { background: #a0aec0; }
+    .tag-berthed { background: #6b46c1; }
+    .tag-departed { background: #2f855a; }
+    .moved { color: #b7791f; font-weight: 600; }
+    pre { background: #1a202c; color: #e2e8f0; padding: 1rem; overflow: auto; border-radius: 8px; font-size: .82rem; }
+    .notice { padding: .6rem .9rem; border-radius: 6px; margin: .5rem 0; display: none; }
+    .notice.error { background: #fff5f5; border: 1px solid #fc8181; color: #9b2c2c; }
+    .notice.success { background: #f0fff4; border: 1px solid #68d391; color: #22543d; }
   </style>
 </head>
 <body>
 <main>
   <h1>港口泊位与航道调度</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <p class="muted">维修单确认后封锁泊位时间窗；撞上的候泊计划自动顺延到维护结束后的最近可用窗口；延期须填原因并重排，提前完工释放窗口。</p>
+  <div class="row">
+    <input id="role" value="admin" size="14" title="调用角色（admin / maintenance_crew / port_controller）">
+    <input id="user" value="demo-admin" size="14" title="X-User-Id">
+    <button class="secondary" onclick="loadAll()">刷新全部</button>
+  </div>
+  <div id="notice" class="notice"></div>
+
+  <h2>登记维修单（维修班）</h2>
+  <div class="row">
+    <input id="m-ref" placeholder="单号 M-2026-001" size="14">
+    <input id="m-berth" placeholder="泊位 B12" size="10">
+    <label class="muted">起 <input id="m-start" type="number" min="0" max="23" value="8" style="width:5rem"> 时</label>
+    <label class="muted">止 <input id="m-end" type="number" min="1" max="24" value="16" style="width:5rem"> 时</label>
+    <input id="m-work" placeholder="作业内容，如：岸桥轨道更换" size="26">
+    <button class="warn" onclick="createMaintenance()">登记维修单</button>
+  </div>
+  <h2 style="border:none;margin-top:.6rem">维修单列表</h2>
+  <table id="maint-table"><thead><tr>
+    <th>单号</th><th>泊位</th><th>封锁窗口</th><th>状态</th><th>作业内容/封锁原因</th><th>延期记录</th><th>操作</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2>靠泊计划（航次）</h2>
+  <div class="row">
+    <input id="v-ref" placeholder="航次号 VOY-01" size="12">
+    <input id="v-vessel" placeholder="船名" size="12">
+    <input id="v-berth" placeholder="泊位 B12" size="9">
+    <label class="muted">ETA <input id="v-eta" type="number" min="0" max="23" value="6" style="width:4.5rem"></label>
+    <label class="muted">ETD <input id="v-etd" type="number" min="1" max="24" value="18" style="width:4.5rem"></label>
+    <button class="secondary" onclick="createVoyage()">登记航次</button>
+  </div>
+  <table id="voyage-table"><thead><tr>
+    <th>航次</th><th>船名</th><th>泊位</th><th>状态</th><th>原始窗口</th><th>当前窗口</th><th>最近重排原因</th><th>操作</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2>调度看板</h2>
+  <div class="row">
+    <input id="board-berth" placeholder="按泊位过滤（可空）" size="16">
+    <button onclick="loadBoard()">查看看板</button>
+  </div>
+  <h3 style="margin-bottom:.2rem">封锁中的泊位</h3>
+  <table id="lock-table"><thead><tr><th>泊位</th><th>封锁窗口</th><th>封锁原因</th><th>单号</th><th>状态</th><th>延期原因</th></tr></thead><tbody></tbody></table>
+  <h3 style="margin-bottom:.2rem">候泊顺序（按原始到港 FCFS）</h3>
+  <table id="wait-table"><thead><tr><th>序</th><th>泊位</th><th>船名</th><th>状态</th><th>原始ETA</th><th>排定窗口</th><th>重排原因</th></tr></thead><tbody></tbody></table>
+  <h3 style="margin-bottom:.2rem">最近重排结果</h3>
+  <table id="result-table"><thead><tr><th>时间</th><th>航次</th><th>泊位</th><th>原ETA</th><th>新窗口</th><th>触发</th><th>原因</th></tr></thead><tbody></tbody></table>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+function apiHeaders() {
+  return {"X-User-Id": document.getElementById("user").value || "demo",
+          "X-Role": document.getElementById("role").value || "admin",
+          "X-Org": "demo", "Content-Type": "application/json"};
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+function hourLabel(h) { return h >= 24 ? ("次日+" + (h - 24) + "时") : (h + "时"); }
+function stateTag(s) { return '<span class="tag tag-' + s + '">' + s + '</span>'; }
+function esc(v) { return String(v == null ? "" : v).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function api(path, method, body) {
+  const res = await fetch(path, {method: method || "GET", headers: apiHeaders(), body: body ? JSON.stringify(body) : undefined});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data && data.message) || ("HTTP " + res.status));
+  return data;
+}
+function notice(msg, ok) {
+  const el = document.getElementById("notice");
+  el.textContent = msg; el.style.display = "block";
+  el.className = "notice " + (ok ? "success" : "error");
+  if (ok) setTimeout(() => { el.style.display = "none"; }, 4000);
+}
+async function run(fn) {
+  try { await fn(); await loadAll(); } catch (e) { notice(e.message, false); }
+}
+
+async function createMaintenance() {
+  await run(async () => {
+    const body = {reference: m("m-ref"), data: {
+      berth: m("m-berth"), start_hour: Number(m("m-start")), end_hour: Number(m("m-end")), work: m("m-work")}};
+    await api("/api/maintenances", "POST", body);
+    notice("维修单已登记（草稿），确认后封锁窗口", true);
+  });
+}
+async function createVoyage() {
+  await run(async () => {
+    const body = {reference: m("v-ref"), data: {
+      vessel: m("v-vessel"), berth: m("v-berth"),
+      vessel_length_m: 180, berth_length_m: 220, draft_m: 10.2, berth_depth_m: 11.5,
+      eta_hour: Number(m("v-eta")), etd_hour: Number(m("v-etd")),
+      risk_level: "medium", dangerous_goods: false, dangerous_class: ""}};
+    await api("/api/records", "POST", body);
+    notice("航次已登记；如撞上维修窗口已自动顺延", true);
+  });
+}
+function m(id) { return document.getElementById(id).value.trim(); }
+
+async function act(id, version, action, data, label) {
+  await run(async () => {
+    await api("/api/records/" + id + "/actions/" + action, "POST", {expected_version: version, data: data || {}});
+    notice(label + "完成", true);
+  });
+}
+function maintenanceActions(item) {
+  const id = item.id, v = item.version, s = item.state;
+  let html = "";
+  if (s === "draft")
+    html += '<button onclick="act('+id+','+v+',\'confirm\',{},\'确认封锁\')">确认封锁</button> '
+          + '<button class="secondary" onclick="cancelM('+id+','+v+')">取消</button>';
+  if (s === "confirmed" || s === "extended")
+    html += '<button class="warn" onclick="extendM('+id+','+v+')">延期</button> '
+          + '<button class="ok" onclick="completeM('+id+','+v+')">完工（可提前）</button>';
+  if (s === "completed" || s === "cancelled") html = '<span class="muted">已归档</span>';
+  return html;
+}
+function cancelM(id, v) {
+  const reason = prompt("取消原因：");
+  if (reason) act(id, v, "cancel", {cancel_reason: reason}, "取消");
+}
+function extendM(id, v) {
+  const end = prompt("新的封锁结束时刻（小时，可跨天>24）：");
+  if (end == null) return;
+  const reason = prompt("延期原因：");
+  if (reason) act(id, v, "extend", {new_end_hour: Number(end), reason: reason}, "延期并重排");
+}
+function completeM(id, v) {
+  const input = prompt("实际完工时刻（小时；早于计划结束即为提前完工，留空=按期）：", "");
+  if (input === null) return;
+  act(id, v, "complete", input === "" ? {} : {actual_end_hour: Number(input)}, "完工释放窗口");
+}
+function voyageActions(item) {
+  const id = item.id, v = item.version, s = item.state;
+  if (s === "draft") return '<button onclick="act('+id+','+v+',\'confirm\',{pilot_id:\'P-01\'},\'确认引航\')">确认引航</button>';
+  if (s === "confirmed") return '<button class="ok" onclick="act('+id+','+v+',\'berth\',{actual_draft_m:10.3},\'靠泊\')">靠泊</button>';
+  if (s === "berthed") return '<button onclick="act('+id+','+v+',\'depart\',{cargo_operation_complete:true},\'离泊\')">离泊</button>';
+  return '<span class="muted">已归档</span>';
+}
+
+function renderMaintenances(items) {
+  document.querySelector("#maint-table tbody").innerHTML = items.map(item => {
+    const p = item.payload;
+    const extends_ = (p.extend_history || []).map(h => esc(h.reason) + "（→" + h.to_end_hour + "时）").join("<br>");
+    return "<tr><td>" + esc(item.reference) + "</td><td>" + esc(p.berth) + "</td><td>"
+      + hourLabel(p.start_hour) + " – " + hourLabel(p.end_hour)
+      + (p.actual_end_hour != null ? '<br><span class="muted">实际完工 ' + hourLabel(p.actual_end_hour) + "</span>" : "")
+      + "</td><td>" + stateTag(item.state) + "</td><td>" + esc(p.work) + "</td><td>" + extends_
+      + (p.cancel_reason ? '<br><span class="muted">' + esc(p.cancel_reason) + "</span>" : "")
+      + "</td><td>" + maintenanceActions(item) + "</td></tr>";
+  }).join("") || '<tr><td colspan="7" class="muted">暂无维修单</td></tr>';
+}
+function renderVoyages(items) {
+  document.querySelector("#voyage-table tbody").innerHTML = items.map(item => {
+    const p = item.payload;
+    const moved = Number(p.eta_hour) !== Number(p.original_eta_hour);
+    return "<tr><td>" + esc(item.reference) + "</td><td>" + esc(p.vessel) + "</td><td>" + esc(p.berth)
+      + "</td><td>" + stateTag(item.state) + "</td><td>" + hourLabel(p.original_eta_hour) + " – " + hourLabel(p.original_etd_hour)
+      + "</td><td class=\"" + (moved ? "moved" : "") + "\">" + hourLabel(p.eta_hour) + " – " + hourLabel(p.etd_hour)
+      + "</td><td>" + esc(p.last_reschedule ? p.last_reschedule.reason : "")
+      + "</td><td>" + voyageActions(item) + "</td></tr>";
+  }).join("") || '<tr><td colspan="8" class="muted">暂无航次</td></tr>';
+}
+function renderBoard(b) {
+  document.querySelector("#lock-table tbody").innerHTML = b.locks.map(l =>
+    "<tr><td>" + esc(l.berth) + "</td><td>" + hourLabel(l.start_hour) + " – " + hourLabel(l.end_hour)
+    + "</td><td>" + esc(l.block_reason) + "</td><td>" + esc(l.reference) + "</td><td>" + stateTag(l.state)
+    + "</td><td>" + esc(l.extend_reason) + "</td></tr>"
+  ).join("") || '<tr><td colspan="6" class="muted">无封锁</td></tr>';
+  document.querySelector("#wait-table tbody").innerHTML = b.waitlist.map(w =>
+    "<tr><td>" + w.rank + "</td><td>" + esc(w.berth) + "</td><td>" + esc(w.vessel) + "</td><td>" + stateTag(w.state)
+    + "</td><td>" + hourLabel(w.original_eta_hour) + "</td><td class=\"" + (w.moved ? "moved" : "") + "\">"
+    + hourLabel(w.eta_hour) + " – " + hourLabel(w.etd_hour) + "</td><td>" + esc(w.last_reason) + "</td></tr>"
+  ).join("") || '<tr><td colspan="7" class="muted">无候泊船舶</td></tr>';
+  document.querySelector("#result-table tbody").innerHTML = b.reschedule_results.map(r =>
+    "<tr><td class='muted'>" + esc(r.at).replace("T", " ").slice(0, 19) + "</td><td>" + esc(r.reference)
+    + "</td><td>" + esc(r.berth) + "</td><td>" + hourLabel(r.from_eta_hour)
+    + "</td><td>" + hourLabel(r.to_eta_hour) + " – " + hourLabel(r.to_etd_hour)
+    + "</td><td>" + esc(r.trigger) + "</td><td>" + esc(r.reason) + "</td></tr>"
+  ).join("") || '<tr><td colspan="7" class="muted">暂无重排记录</td></tr>';
+}
+
+async function loadMaintenances() { renderMaintenances((await api("/api/maintenances?limit=200")).items); }
+async function loadVoyages() { renderVoyages((await api("/api/records?limit=200")).items); }
+async function loadBoard() {
+  const berth = document.getElementById("board-berth").value.trim();
+  renderBoard(await api("/api/board" + (berth ? "?berth=" + encodeURIComponent(berth) : "")));
+}
+async function loadAll() {
+  try {
+    await Promise.all([loadMaintenances(), loadVoyages(), loadBoard()]);
+  } catch (e) { notice(e.message, false); }
+}
+loadAll();
 </script>
 </body>
 </html>

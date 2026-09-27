@@ -30,6 +30,7 @@ class Repository:
                 CREATE TABLE IF NOT EXISTS records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     reference TEXT NOT NULL UNIQUE,
+                    kind TEXT NOT NULL DEFAULT 'voyage',
                     state TEXT NOT NULL,
                     version INTEGER NOT NULL DEFAULT 1,
                     payload TEXT NOT NULL,
@@ -49,8 +50,13 @@ class Repository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
+                CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action, id);
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(records)").fetchall()}
+            if "kind" not in columns:
+                connection.execute("ALTER TABLE records ADD COLUMN kind TEXT NOT NULL DEFAULT 'voyage'")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_records_kind_state ON records(kind, state)")
 
     @staticmethod
     def _row(row: sqlite3.Row) -> Dict[str, Any]:
@@ -58,18 +64,18 @@ class Repository:
         item["payload"] = json.loads(item["payload"])
         return item
 
-    def create(self, reference: str, state: str, payload: Dict[str, Any], actor_id: str) -> Dict[str, Any]:
+    def create(self, reference: str, state: str, payload: Dict[str, Any], actor_id: str, kind: str = "voyage") -> Dict[str, Any]:
         now = _now()
         try:
             with self._connect() as connection:
                 cursor = connection.execute(
-                    "INSERT INTO records(reference,state,version,payload,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                    (reference, state, 1, json.dumps(payload, ensure_ascii=False, sort_keys=True), actor_id, actor_id, now, now),
+                    "INSERT INTO records(reference,kind,state,version,payload,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (reference, kind, state, 1, json.dumps(payload, ensure_ascii=False, sort_keys=True), actor_id, actor_id, now, now),
                 )
                 record_id = int(cursor.lastrowid)
                 connection.execute(
                     "INSERT INTO audit_events(record_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
-                    (record_id, "created", actor_id, 1, json.dumps({"state": state}, ensure_ascii=False, sort_keys=True), now),
+                    (record_id, "created", actor_id, 1, json.dumps({"state": state, "kind": kind}, ensure_ascii=False, sort_keys=True), now),
                 )
                 row = connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
         except sqlite3.IntegrityError as exc:
@@ -83,13 +89,18 @@ class Repository:
             raise NotFound("记录不存在")
         return self._row(row)
 
-    def list_records(self, state: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_records(self, state: Optional[str] = None, limit: int = 100, kind: Optional[str] = None) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
+        clauses, params = [], []
+        if state:
+            clauses.append("state=?")
+            params.append(state)
+        if kind:
+            clauses.append("kind=?")
+            params.append(kind)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._connect() as connection:
-            if state:
-                rows = connection.execute("SELECT * FROM records WHERE state=? ORDER BY id DESC LIMIT ?", (state, limit)).fetchall()
-            else:
-                rows = connection.execute("SELECT * FROM records ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = connection.execute("SELECT * FROM records%s ORDER BY id DESC LIMIT ?" % where, (*params, limit)).fetchall()
         return [self._row(row) for row in rows]
 
     def mutate(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
@@ -141,6 +152,32 @@ class Repository:
         with self._connect() as connection:
             rows = connection.execute("SELECT state, COUNT(*) AS total FROM records GROUP BY state").fetchall()
         return {str(row["state"]): int(row["total"]) for row in rows}
+
+    def stats_by_kind(self) -> Dict[str, Dict[str, int]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT kind, state, COUNT(*) AS total FROM records GROUP BY kind, state").fetchall()
+        result: Dict[str, Dict[str, int]] = {}
+        for row in rows:
+            result.setdefault(str(row["kind"]), {})[str(row["state"])] = int(row["total"])
+        return result
+
+    def recent_events_by_action(self, actions: List[str], limit: int = 50) -> List[Dict[str, Any]]:
+        if not actions:
+            return []
+        placeholders = ",".join("?" for _ in actions)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT a.*, r.reference AS reference, r.kind AS kind FROM audit_events a"
+                " JOIN records r ON r.id = a.record_id"
+                " WHERE a.action IN (%s) ORDER BY a.id DESC LIMIT ?" % placeholders,
+                (*actions, max(1, min(int(limit), 200))),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = json.loads(item["details"])
+            result.append(item)
+        return result
 
     def health(self) -> bool:
         try:
