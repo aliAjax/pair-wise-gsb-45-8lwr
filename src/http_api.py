@@ -12,6 +12,10 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+MAINTENANCE_RE = re.compile(r"^/api/maintenance/(\d+)$")
+MAINTENANCE_ACTION_RE = re.compile(r"^/api/maintenance/(\d+)/actions/([a-z_]+)$")
+MAINTENANCE_AUDIT_RE = re.compile(r"^/api/maintenance/(\d+)/audit$")
+BERTH_QUEUE_RE = re.compile(r"^/api/berths/([\w-]+)/queue$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -84,6 +88,23 @@ def make_handler(service: Any, static_dir: Path):
                 if match:
                     self._send(200, {"items": service.timeline(self._actor(), int(match.group(1)))})
                     return
+                if parsed.path == "/api/maintenance":
+                    query = parse_qs(parsed.query)
+                    orders = service.list_maintenance(self._actor(), state=query.get("state", [None])[0], berth=query.get("berth", [None])[0], limit=int(query.get("limit", ["100"])[0]))
+                    self._send(200, {"items": orders})
+                    return
+                match = MAINTENANCE_AUDIT_RE.match(parsed.path)
+                if match:
+                    self._send(200, {"items": service.maintenance_timeline(self._actor(), int(match.group(1)))})
+                    return
+                match = MAINTENANCE_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_maintenance(self._actor(), int(match.group(1))))
+                    return
+                match = BERTH_QUEUE_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.berth_queue(self._actor(), match.group(1)))
+                    return
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
@@ -98,6 +119,18 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
+                    return
+                if parsed.path == "/api/maintenance":
+                    order = service.create_maintenance(self._actor(), body.get("reference", ""), body.get("data", {}))
+                    self._send(201, order)
+                    return
+                match = MAINTENANCE_ACTION_RE.match(parsed.path)
+                if match:
+                    version = body.get("expected_version")
+                    if not isinstance(version, int):
+                        raise ValidationError("expected_version必须是整数")
+                    order = service.act_maintenance(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
+                    self._send(200, order)
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:

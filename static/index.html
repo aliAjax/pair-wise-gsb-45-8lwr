@@ -5,29 +5,276 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>港口泊位与航道调度</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
-    button { padding: .55rem .9rem; cursor: pointer; }
-    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    :root { --line:#d8dee6; --ink:#17212b; --muted:#5b6b7b; --accent:#0b5fff; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; color: var(--ink); background: #f7f9fb; }
+    main { max-width: 1080px; margin: auto; padding: 1.5rem; }
+    h1 { font-size: 1.4rem; margin-bottom: .2rem; }
+    h2 { font-size: 1.05rem; margin: 0 0 .6rem; }
+    section { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+    th, td { border-bottom: 1px solid var(--line); padding: .4rem .5rem; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+    button { padding: .35rem .7rem; cursor: pointer; border: 1px solid var(--line); background: #fff; border-radius: 6px; margin: .1rem .15rem .1rem 0; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    input, select { padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 6px; font-size: .88rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: .5rem; margin-bottom: .6rem; }
+    .grid label { display: flex; flex-direction: column; font-size: .78rem; color: var(--muted); gap: .2rem; }
+    .badge { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .78rem; background: #eef2f6; }
+    .badge.locked, .badge.berthed { background: #fde8e8; color: #a12020; }
+    .badge.completed, .badge.departed { background: #e6f6ec; color: #137a3f; }
+    .badge.draft { background: #fff4e0; color: #b3541e; }
+    .badge.confirmed { background: #e3ecff; color: #1f4fb8; }
+    .muted { color: var(--muted); font-size: .85rem; }
+    .error { color: #a12020; }
+    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; font-size: .8rem; }
+    .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
   </style>
 </head>
 <body>
 <main>
   <h1>港口泊位与航道调度</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <p class="muted">维护单确认后锁定泊位时间窗，撞上的靠泊计划自动重排到维护结束后的最近可用窗口；已靠泊与已离泊航次照旧留档。</p>
+
+  <section>
+    <h2>登记维护单</h2>
+    <div class="grid">
+      <label>单号<input id="m-ref" value="MT-1001"></label>
+      <label>泊位<input id="m-berth" value="B12"></label>
+      <label>开始时刻（时）<input id="m-start" type="number" min="0" max="23" value="8"></label>
+      <label>结束时刻（时）<input id="m-end" type="number" min="1" max="24" value="14"></label>
+      <label>作业内容<input id="m-work" value="吊机检修"></label>
+    </div>
+    <button class="primary" id="m-create">登记维护单</button>
+  </section>
+
+  <section>
+    <h2>维护单列表（封锁原因与重排结果）</h2>
+    <table>
+      <thead><tr><th>单号</th><th>泊位</th><th>封锁窗口</th><th>封锁原因</th><th>状态</th><th>重排结果</th><th>操作</th></tr></thead>
+      <tbody id="order-rows"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>泊位候泊队列</h2>
+    <div class="row">
+      <label class="muted">泊位 <input id="queue-berth" value="B12" style="width:6rem"></label>
+      <button id="queue-load">查看队列</button>
+    </div>
+    <h2 style="margin-top:1rem">生效封锁</h2>
+    <table>
+      <thead><tr><th>维护单</th><th>窗口</th><th>封锁原因</th></tr></thead>
+      <tbody id="lock-rows"><tr><td colspan="3" class="muted">暂无</td></tr></tbody>
+    </table>
+    <h2 style="margin-top:1rem">候泊顺序</h2>
+    <table>
+      <thead><tr><th>#</th><th>航次</th><th>船名</th><th>状态</th><th>当前窗口</th><th>原窗口 / 重排原因</th></tr></thead>
+      <tbody id="queue-rows"><tr><td colspan="6" class="muted">暂无</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>登记靠泊计划</h2>
+    <div class="grid">
+      <label>航次号<input id="v-ref" value="VOY-3001"></label>
+      <label>船名<input id="v-vessel" value="HaiYun"></label>
+      <label>泊位<input id="v-berth" value="B12"></label>
+      <label>船长（米）<input id="v-vlen" type="number" value="180"></label>
+      <label>泊位长度（米）<input id="v-blen" type="number" value="220"></label>
+      <label>吃水（米）<input id="v-draft" type="number" step="0.1" value="10.2"></label>
+      <label>泊位水深（米）<input id="v-depth" type="number" step="0.1" value="11.5"></label>
+      <label>预计到港（时）<input id="v-eta" type="number" min="0" max="23" value="6"></label>
+      <label>预计离港（时）<input id="v-etd" type="number" min="1" max="24" value="10"></label>
+      <label>风险等级
+        <select id="v-risk"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select>
+      </label>
+    </div>
+    <button class="primary" id="v-create">登记靠泊计划</button>
+  </section>
+
+  <section>
+    <h2>靠泊计划列表</h2>
+    <table>
+      <thead><tr><th>航次</th><th>船名</th><th>泊位</th><th>状态</th><th>窗口</th><th>版本</th></tr></thead>
+      <tbody id="record-rows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>结果输出</h2>
+    <pre id="output">操作结果与错误信息会显示在这里。</pre>
+  </section>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+const STATE_LABELS = {draft:"草稿", confirmed:"已确认", berthed:"已靠泊", departed:"已离泊", cancelled:"已取消", locked:"封锁中", completed:"已完工"};
+
+async function api(path, options = {}) {
+  const init = {headers: {...headers}, ...options};
+  if (init.body) init.headers = {...headers, "Content-Type": "application/json"};
+  const response = await fetch(path, init);
+  const raw = await response.text();
+  const data = raw ? JSON.parse(raw) : {};
+  if (!response.ok) throw new Error(data.message || ("HTTP " + response.status));
+  return data;
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+
+function show(data, isError = false) {
+  const out = document.getElementById("output");
+  out.className = isError ? "error" : "";
+  out.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+
+async function run(fn) {
+  try { await fn(); } catch (err) { show(err.message, true); }
+}
+
+function fmtWindow(start, end) { return start + ":00-" + end + ":00"; }
+function badge(state) { return '<span class="badge ' + state + '">' + (STATE_LABELS[state] || state) + '</span>'; }
+function cell(row, html) { const td = document.createElement("td"); td.innerHTML = html; row.appendChild(td); return td; }
+
+async function loadOrders() {
+  const data = await api("/api/maintenance?limit=50");
+  const tbody = document.getElementById("order-rows");
+  tbody.innerHTML = "";
+  if (!data.items.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">暂无维护单</td></tr>';
+    return;
+  }
+  for (const order of data.items) {
+    const p = order.payload;
+    const moves = (p.last_result && p.last_result.moves) || [];
+    const tr = document.createElement("tr");
+    cell(tr, order.reference);
+    cell(tr, p.berth);
+    cell(tr, fmtWindow(p.start_hour, p.end_hour));
+    cell(tr, p.work_content);
+    cell(tr, badge(order.state));
+    cell(tr, moves.length
+      ? moves.map(m => m.reference + " " + fmtWindow(m.from[0], m.from[1]) + " → " + fmtWindow(m.to[0], m.to[1])).join("<br>")
+      : '<span class="muted">无受影响航次</span>');
+    const actions = cell(tr, "");
+    const add = (label, fn) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.onclick = () => run(fn);
+      actions.appendChild(b);
+    };
+    if (order.state === "draft") add("确认封锁", async () => { await orderAction(order, "confirm", {}); });
+    if (order.state === "locked") {
+      add("延期", async () => {
+        const end = prompt("新的结束时刻（小时，需大于 " + p.end_hour + "）");
+        if (end === null) return;
+        const reason = prompt("延期原因（必填）");
+        if (!reason) { show("延期必须填写原因", true); return; }
+        await orderAction(order, "extend", {new_end_hour: Number(end), reason});
+      });
+      add("完工", async () => { await orderAction(order, "complete", {note: "现场完工"}); });
+    }
+    if (order.state === "draft" || order.state === "locked") {
+      add("取消", async () => {
+        const reason = prompt("取消原因（必填）");
+        if (!reason) return;
+        await orderAction(order, "cancel", {cancel_reason: reason});
+      });
+    }
+    add("详情", async () => { show(await api("/api/maintenance/" + order.id)); });
+    tbody.appendChild(tr);
+  }
+}
+
+async function orderAction(order, action, data) {
+  const updated = await api("/api/maintenance/" + order.id + "/actions/" + action, {
+    method: "POST",
+    body: JSON.stringify({expected_version: order.version, data}),
+  });
+  show(updated);
+  await refresh();
+}
+
+async function loadQueue() {
+  const berth = document.getElementById("queue-berth").value.trim() || "B12";
+  const data = await api("/api/berths/" + encodeURIComponent(berth) + "/queue");
+  document.getElementById("lock-rows").innerHTML = data.locks.length
+    ? data.locks.map(l => "<tr><td>" + l.reference + "</td><td>" + fmtWindow(l.start_hour, l.end_hour) + "</td><td>" + l.work_content + "</td></tr>").join("")
+    : '<tr><td colspan="3" class="muted">当前无封锁</td></tr>';
+  document.getElementById("queue-rows").innerHTML = data.queue.length
+    ? data.queue.map((item, i) => {
+        const origin = item.displaced_by
+          ? fmtWindow(item.original_eta_hour, item.original_etd_hour) + "（因 " + item.displaced_by + " 重排）"
+          : "—";
+        return "<tr><td>" + (i + 1) + "</td><td>" + item.reference + "</td><td>" + item.vessel + "</td><td>" + badge(item.state) + "</td><td>" + fmtWindow(item.eta_hour, item.etd_hour) + "</td><td>" + origin + "</td></tr>";
+      }).join("")
+    : '<tr><td colspan="6" class="muted">暂无候泊航次</td></tr>';
+}
+
+async function loadRecords() {
+  const data = await api("/api/records?limit=50");
+  const tbody = document.getElementById("record-rows");
+  tbody.innerHTML = "";
+  if (!data.items.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无靠泊计划</td></tr>';
+    return;
+  }
+  for (const record of data.items) {
+    const p = record.payload;
+    const tr = document.createElement("tr");
+    cell(tr, record.reference);
+    cell(tr, p.vessel || "");
+    cell(tr, p.berth || "");
+    cell(tr, badge(record.state));
+    const origin = p.displaced_by ? '<br><span class="muted">原 ' + fmtWindow(p.original_eta_hour, p.original_etd_hour) + "，因 " + p.displaced_by + " 重排</span>" : "";
+    cell(tr, fmtWindow(p.eta_hour, p.etd_hour) + origin);
+    cell(tr, String(record.version));
+    tbody.appendChild(tr);
+  }
+}
+
+async function refresh() {
+  await loadOrders();
+  await loadQueue();
+  await loadRecords();
+}
+
+document.getElementById("m-create").onclick = () => run(async () => {
+  const g = id => document.getElementById(id).value;
+  const created = await api("/api/maintenance", {
+    method: "POST",
+    body: JSON.stringify({reference: g("m-ref"), data: {
+      berth: g("m-berth"),
+      start_hour: Number(g("m-start")),
+      end_hour: Number(g("m-end")),
+      work_content: g("m-work"),
+    }}),
+  });
+  show(created);
+  await refresh();
+});
+
+document.getElementById("v-create").onclick = () => run(async () => {
+  const g = id => document.getElementById(id).value;
+  const created = await api("/api/records", {
+    method: "POST",
+    body: JSON.stringify({reference: g("v-ref"), data: {
+      vessel: g("v-vessel"),
+      berth: g("v-berth"),
+      vessel_length_m: Number(g("v-vlen")),
+      berth_length_m: Number(g("v-blen")),
+      draft_m: Number(g("v-draft")),
+      berth_depth_m: Number(g("v-depth")),
+      eta_hour: Number(g("v-eta")),
+      etd_hour: Number(g("v-etd")),
+      risk_level: g("v-risk"),
+      dangerous_goods: false,
+      dangerous_class: "",
+    }}),
+  });
+  show(created);
+  await refresh();
+});
+
+document.getElementById("queue-load").onclick = () => run(loadQueue);
+run(refresh);
 </script>
 </body>
 </html>

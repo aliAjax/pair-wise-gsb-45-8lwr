@@ -47,8 +47,32 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS maintenance_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    reference TEXT NOT NULL UNIQUE,
+                    berth TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    payload TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS maintenance_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id INTEGER NOT NULL REFERENCES maintenance_orders(id) ON DELETE CASCADE,
+                    action TEXT NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    details TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
+                CREATE INDEX IF NOT EXISTS idx_maintenance_state ON maintenance_orders(state);
+                CREATE INDEX IF NOT EXISTS idx_maintenance_berth ON maintenance_orders(berth);
+                CREATE INDEX IF NOT EXISTS idx_maintenance_events_order ON maintenance_events(order_id, id);
                 """
             )
 
@@ -141,6 +165,99 @@ class Repository:
         with self._connect() as connection:
             rows = connection.execute("SELECT state, COUNT(*) AS total FROM records GROUP BY state").fetchall()
         return {str(row["state"]): int(row["total"]) for row in rows}
+
+    def create_maintenance(self, reference: str, berth: str, state: str, payload: Dict[str, Any], actor_id: str) -> Dict[str, Any]:
+        now = _now()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO maintenance_orders(reference,berth,state,version,payload,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (reference, berth, state, 1, json.dumps(payload, ensure_ascii=False, sort_keys=True), actor_id, actor_id, now, now),
+                )
+                order_id = int(cursor.lastrowid)
+                connection.execute(
+                    "INSERT INTO maintenance_events(order_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
+                    (order_id, "created", actor_id, 1, json.dumps({"state": state}, ensure_ascii=False, sort_keys=True), now),
+                )
+                row = connection.execute("SELECT * FROM maintenance_orders WHERE id=?", (order_id,)).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise Conflict("reference已存在") from exc
+        return self._row(row)
+
+    def get_maintenance(self, order_id: int) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM maintenance_orders WHERE id=?", (order_id,)).fetchone()
+        if row is None:
+            raise NotFound("维护单不存在")
+        return self._row(row)
+
+    def list_maintenance(self, state: Optional[str] = None, berth: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        clauses: List[str] = []
+        params: List[Any] = []
+        if state:
+            clauses.append("state=?")
+            params.append(state)
+        if berth:
+            clauses.append("berth=?")
+            params.append(berth)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM maintenance_orders" + where + " ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+        return [self._row(row) for row in rows]
+
+    def mutate_maintenance_with_plans(self, order_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any], plan_updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """维护单状态变更与关联航次重排在同一事务内提交。"""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT version FROM maintenance_orders WHERE id=?", (order_id,)).fetchone()
+            if row is None:
+                connection.rollback()
+                raise NotFound("维护单不存在")
+            if int(row["version"]) != int(expected_version):
+                connection.rollback()
+                raise Conflict("版本冲突，请刷新后重试")
+            version = int(expected_version) + 1
+            connection.execute(
+                "UPDATE maintenance_orders SET state=?,version=?,payload=?,updated_by=?,updated_at=? WHERE id=?",
+                (state, version, json.dumps(payload, ensure_ascii=False, sort_keys=True), actor_id, now, order_id),
+            )
+            connection.execute(
+                "INSERT INTO maintenance_events(order_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
+                (order_id, action, actor_id, version, json.dumps(details, ensure_ascii=False, sort_keys=True), now),
+            )
+            for update in plan_updates:
+                plan = connection.execute("SELECT version FROM records WHERE id=?", (update["record_id"],)).fetchone()
+                if plan is None:
+                    connection.rollback()
+                    raise NotFound("航次记录不存在")
+                if int(plan["version"]) != int(update["expected_version"]):
+                    connection.rollback()
+                    raise Conflict("航次计划版本冲突，请刷新后重试")
+                plan_version = int(update["expected_version"]) + 1
+                connection.execute(
+                    "UPDATE records SET state=?,version=?,payload=?,updated_by=?,updated_at=? WHERE id=?",
+                    (update["state"], plan_version, json.dumps(update["payload"], ensure_ascii=False, sort_keys=True), actor_id, now, update["record_id"]),
+                )
+                connection.execute(
+                    "INSERT INTO audit_events(record_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
+                    (update["record_id"], update["action"], actor_id, plan_version, json.dumps(update["details"], ensure_ascii=False, sort_keys=True), now),
+                )
+            result = connection.execute("SELECT * FROM maintenance_orders WHERE id=?", (order_id,)).fetchone()
+            connection.commit()
+        return self._row(result)
+
+    def maintenance_timeline(self, order_id: int) -> List[Dict[str, Any]]:
+        self.get_maintenance(order_id)
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM maintenance_events WHERE order_id=? ORDER BY id", (order_id,)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = json.loads(item["details"])
+            result.append(item)
+        return result
 
     def health(self) -> bool:
         try:
